@@ -12,3 +12,4 @@ src-tauri/WixTools/
 
 # Bun
 bun.lockb
+src-tauri/gen/

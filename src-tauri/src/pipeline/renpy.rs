@@ -1,6 +1,6 @@
 use crate::error::AppError;
+use crate::error_translate::translate;
 use crate::pipeline::cordova::{build_env, emit_log, stream_cmd};
-use crate::pipeline::signing::{sign_apk, zipalign};
 use crate::pipeline::types::{BuildOptions, BuildResult, PipelineStage, PipelineStageEvent, StageStatus};
 use crate::settings::AppSettings;
 use std::path::{Path, PathBuf};
@@ -109,6 +109,32 @@ fn find_renpy_apk(sdk_path: &str, game_path: &Path, app_name: &str) -> Option<Pa
     candidates.into_iter().find(|p| p.exists())
 }
 
+/// Generate the android.keystore RAPT expects: alias "android", password "android".
+async fn ensure_rapt_keystore(app: &AppHandle, dest: &Path) -> Result<(), AppError> {
+    use tokio::process::Command;
+    let status = Command::new("keytool")
+        .args([
+            "-genkeypair",
+            "-keystore", &dest.to_string_lossy(),
+            "-alias", "android",
+            "-keyalg", "RSA",
+            "-keysize", "2048",
+            "-validity", "10000",
+            "-storepass", "android",
+            "-keypass", "android",
+            "-dname", "CN=vn2apk, OU=vn2apk, O=vn2apk, L=Unknown, ST=Unknown, C=US",
+            "-noprompt",
+        ])
+        .status()
+        .await
+        .map_err(|e| AppError::msg(format!("keytool not found: {e}")))?;
+    if !status.success() {
+        return Err(AppError::msg("keytool failed to generate android.keystore"));
+    }
+    emit_log(app, "info", &format!("Generated {}", dest.display()));
+    Ok(())
+}
+
 pub async fn run_renpy_pipeline(
     app: AppHandle,
     game_path: PathBuf,
@@ -118,7 +144,7 @@ pub async fn run_renpy_pipeline(
 ) {
     match run_pipeline_inner(&app, &game_path, &options, &settings, &cancel).await {
         Ok(result) => { let _ = app.emit("pipeline-done", result); }
-        Err(e)     => { let _ = app.emit("pipeline-error", e.to_string()); }
+        Err(e)     => { let _ = app.emit("pipeline-error", translate(&e.to_string())); }
     }
 }
 
@@ -169,11 +195,19 @@ async fn run_pipeline_inner(
         e
     })?;
 
+    // RAPT always signs with <game_path>/android.keystore using alias "android" / password "android".
+    // Generate that keystore now if it doesn't already exist.
+    let keystore_dest = game_path.join("android.keystore");
+    let _ = std::fs::remove_file(&keystore_dest);
+    emit_log(app, "info", "Generating android.keystore for RAPT signing...");
+    ensure_rapt_keystore(app, &keystore_dest).await.map_err(|e| {
+        emit_stage(app, PipelineStage::Build, StageStatus::Failed);
+        e
+    })?;
+
     let env = build_env(settings);
     let renpy_str = renpy_sh.to_string_lossy().into_owned();
     let game_str = game_path.to_string_lossy().into_owned();
-    // The android_build command is registered by the launcher game, not the base engine.
-    // Correct invocation: renpy.sh <sdk>/launcher android_build <game_path>
     let launcher_str = Path::new(&settings.renpy_sdk_path)
         .join("launcher")
         .to_string_lossy()
@@ -194,7 +228,10 @@ async fn run_pipeline_inner(
     })?;
     check_cancel(cancel)?;
 
-    let unsigned_apk = find_renpy_apk(&settings.renpy_sdk_path, game_path, &options.app_name)
+    // Clean up the keystore copy we put in the game dir
+    let _ = std::fs::remove_file(&keystore_dest);
+
+    let signed_apk = find_renpy_apk(&settings.renpy_sdk_path, game_path, &options.app_name)
         .ok_or_else(|| {
             emit_stage(app, PipelineStage::Build, StageStatus::Failed);
             AppError::msg(
@@ -202,28 +239,13 @@ async fn run_pipeline_inner(
                  Check build logs for the output path.",
             )
         })?;
-    emit_log(app, "info", &format!("Found APK: {}", unsigned_apk.display()));
+    emit_log(app, "info", &format!("Found APK: {}", signed_apk.display()));
     emit_stage(app, PipelineStage::Build, StageStatus::Done);
     check_cancel(cancel)?;
 
-    // ── Stage 7: Zipalign ────────────────────────────────────────────────────
-    emit_stage(app, PipelineStage::Align, StageStatus::Running);
-    let work_dir = game_path.parent().unwrap_or(Path::new("/tmp"));
-    let aligned_apk = work_dir.join("renpy-aligned.apk");
-    zipalign(app, &unsigned_apk, &aligned_apk, settings)
-        .await
-        .map_err(|e| { emit_stage(app, PipelineStage::Align, StageStatus::Failed); e })?;
+    // Gradle already signed the APK — skip separate zipalign/sign stages
     emit_stage(app, PipelineStage::Align, StageStatus::Done);
-    check_cancel(cancel)?;
-
-    // ── Stage 8: Sign ────────────────────────────────────────────────────────
-    emit_stage(app, PipelineStage::Sign, StageStatus::Running);
-    let signed_apk = work_dir.join(format!("{}-signed.apk", options.app_name.replace(' ', "_")));
-    sign_apk(app, &aligned_apk, &signed_apk, &options.storepass, &options.keypass, settings)
-        .await
-        .map_err(|e| { emit_stage(app, PipelineStage::Sign, StageStatus::Failed); e })?;
     emit_stage(app, PipelineStage::Sign, StageStatus::Done);
-    check_cancel(cancel)?;
 
     // ── Stage 9: Copy to output ──────────────────────────────────────────────
     emit_stage(app, PipelineStage::Output, StageStatus::Running);

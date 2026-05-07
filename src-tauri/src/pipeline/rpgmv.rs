@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use crate::error_translate::translate;
 use crate::pipeline::cordova::{
     add_android_platform, build_android_release, emit_log, patch_config_xml, scaffold_cordova,
 };
@@ -320,7 +321,7 @@ pub async fn run_rpgmv_pipeline(
             let _ = app.emit("pipeline-done", result);
         }
         Err(e) => {
-            let _ = app.emit("pipeline-error", e.to_string());
+            let _ = app.emit("pipeline-error", translate(&e.to_string()));
         }
     }
 }

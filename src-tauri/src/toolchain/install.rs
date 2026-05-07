@@ -57,21 +57,21 @@ async fn stream_command(
     let stderr = child.stderr.take().unwrap();
     let mut stdout_lines = BufReader::new(stdout).lines();
     let mut stderr_lines = BufReader::new(stderr).lines();
+    let mut stdout_done = false;
+    let mut stderr_done = false;
 
-    loop {
+    while !stdout_done || !stderr_done {
         tokio::select! {
-            line = stdout_lines.next_line() => {
+            line = stdout_lines.next_line(), if !stdout_done => {
                 match line {
                     Ok(Some(l)) => { let _ = app_handle.emit(event, LogLine { level: "info".into(), message: l, timestamp: now_ms() }); }
-                    Ok(None) => break,
-                    Err(e) => { let _ = app_handle.emit(event, LogLine { level: "error".into(), message: e.to_string(), timestamp: now_ms() }); break; }
+                    _ => { stdout_done = true; }
                 }
             }
-            line = stderr_lines.next_line() => {
+            line = stderr_lines.next_line(), if !stderr_done => {
                 match line {
                     Ok(Some(l)) => { let _ = app_handle.emit(event, LogLine { level: "warn".into(), message: l, timestamp: now_ms() }); }
-                    Ok(None) => {}
-                    Err(_) => {}
+                    _ => { stderr_done = true; }
                 }
             }
         }
@@ -233,6 +233,12 @@ echo "Done: Ren'Py SDK installed to {h}/renpy-8.5.2-sdk"
             Ok(Some(updated))
         }
 
+        "rapt" => {
+            Err(AppError::msg(
+                "RAPT must be installed via the Ren'Py Launcher: open renpy.sh, go to Android → Install SDK.",
+            ))
+        }
+
         _ => {
             emit_info(app, &format!("No auto-install available for '{tool_name}'."));
             Ok(None)
@@ -248,6 +254,16 @@ pub async fn generate_keystore(
     keypass: &str,
     dname: &str,
 ) -> Result<(), AppError> {
+    let expanded = if keystore_path.starts_with('~') {
+        keystore_path.replacen('~', &home(), 1)
+    } else {
+        keystore_path.to_string()
+    };
+    let keystore_path = expanded.as_str();
+    if std::path::Path::new(keystore_path).exists() {
+        std::fs::remove_file(keystore_path)
+            .map_err(|e| AppError::msg(format!("Failed to remove existing keystore: {e}")))?;
+    }
     stream_command(
         app_handle,
         "tool-install-log",

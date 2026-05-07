@@ -129,6 +129,48 @@ fn detect_renpy_sdk(sdk_path: &str) -> ToolStatus {
     }
 }
 
+fn detect_rapt(sdk_path: &str) -> ToolStatus {
+    let name = "RAPT";
+    let binary = "rapt";
+
+    if sdk_path.is_empty() {
+        return ToolStatus {
+            name: name.to_string(),
+            binary: binary.to_string(),
+            found: false,
+            version: None,
+            path: None,
+            required: false,
+        };
+    }
+
+    let gradle_file = std::path::Path::new(sdk_path).join("rapt/project/build.gradle");
+    if gradle_file.exists() {
+        ToolStatus {
+            name: name.to_string(),
+            binary: binary.to_string(),
+            found: true,
+            version: Some("installed".to_string()),
+            path: Some(
+                std::path::Path::new(sdk_path)
+                    .join("rapt")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            required: false,
+        }
+    } else {
+        ToolStatus {
+            name: name.to_string(),
+            binary: binary.to_string(),
+            found: false,
+            version: None,
+            path: None,
+            required: false,
+        }
+    }
+}
+
 pub fn check_all_tools(settings: &AppSettings) -> Vec<ToolStatus> {
     let sdk = settings.android_sdk_path.trim_end_matches('/');
     let build_tools_bin = if sdk.is_empty() {
@@ -190,5 +232,6 @@ pub fn check_all_tools(settings: &AppSettings) -> Vec<ToolStatus> {
             true,
         ),
         detect_renpy_sdk(&settings.renpy_sdk_path),
+        detect_rapt(&settings.renpy_sdk_path),
     ]
 }

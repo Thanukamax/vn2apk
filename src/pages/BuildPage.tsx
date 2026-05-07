@@ -24,7 +24,13 @@ import { usePipelineContext } from "@/contexts/PipelineContext";
 import { useSettings } from "@/hooks/useSettings";
 import { BuildOptions, EngineDetectResult, ValidationResult } from "@/types/pipeline";
 
-type PageState = "idle" | "detecting" | "ready" | "password";
+type PageState = "idle" | "detecting" | "ready" | "preflight" | "password";
+
+interface PreflightIssue {
+  severity: "error" | "warning";
+  message: string;
+  hint: string;
+}
 
 export function BuildPage() {
   const { settings } = useSettings();
@@ -41,6 +47,7 @@ export function BuildPage() {
   });
   const [storepass, setStorepass] = useState("");
   const [keypass, setKeypass] = useState("");
+  const [preflightIssues, setPreflightIssues] = useState<PreflightIssue[]>([]);
 
   // When pipeline finishes/fails, keep showing the terminal & result on the build page
   // but don't reset pageState — user stays on the result view.
@@ -83,13 +90,27 @@ export function BuildPage() {
     []
   );
 
-  const handleBuild = useCallback(() => {
-    if (settings.keystore_path) {
-      setPageState("password");
-    } else {
+  const handleBuild = useCallback(async () => {
+    if (!settings.keystore_path) {
       toast.error("No keystore configured. Set it up in Settings first.");
+      return;
     }
-  }, [settings.keystore_path]);
+    try {
+      const issues = await invoke<PreflightIssue[]>("cmd_preflight_check", {
+        engine: options.engine ?? detection?.engine ?? "",
+        gamePath,
+      });
+      setPreflightIssues(issues);
+      const hasErrors = issues.some((i) => i.severity === "error");
+      if (hasErrors) {
+        setPageState("preflight");
+      } else {
+        setPageState("password");
+      }
+    } catch {
+      setPageState("password"); // preflight unavailable — proceed anyway
+    }
+  }, [settings.keystore_path, options.engine, detection, gamePath]);
 
   const confirmBuild = useCallback(async () => {
     const full: BuildOptions = {
@@ -98,6 +119,7 @@ export function BuildPage() {
       version_name: options.version_name ?? "1.0.0",
       version_code: options.version_code ?? 1,
       icon_path: options.icon_path ?? null,
+      engine: options.engine ?? detection?.engine ?? "",
       storepass,
       keypass,
     };
@@ -207,6 +229,34 @@ export function BuildPage() {
           <BuildResultCard result={result} error={error} onReset={handleReset} />
         </>
       )}
+
+      {/* Pre-flight issues dialog */}
+      <Dialog open={pageState === "preflight"} onOpenChange={(o) => !o && setPageState("ready")}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Fix issues before building</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2 max-h-72 overflow-y-auto">
+            {preflightIssues.map((issue, i) => (
+              <div key={i} className={`rounded-md border p-3 text-sm space-y-1 ${issue.severity === "error" ? "border-destructive/50 bg-destructive/10" : "border-amber-500/50 bg-amber-500/10"}`}>
+                <p className={issue.severity === "error" ? "text-destructive font-medium" : "text-amber-400 font-medium"}>
+                  {issue.severity === "error" ? "✗" : "⚠"} {issue.message}
+                </p>
+                {issue.hint && <p className="text-xs text-muted-foreground">{issue.hint}</p>}
+              </div>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setPageState("ready")}>Cancel</Button>
+            <Button
+              onClick={() => setPageState("password")}
+              disabled={preflightIssues.some((i) => i.severity === "error")}
+            >
+              Build Anyway
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Keystore password dialog */}
       <Dialog open={pageState === "password"} onOpenChange={(o) => !o && setPageState("ready")}>

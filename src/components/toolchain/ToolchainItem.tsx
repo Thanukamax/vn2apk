@@ -23,6 +23,7 @@ const TOOL_ICONS: Record<string, React.ComponentType<{ className?: string }>> = 
   Cordova: Binary,
   apksigner: Wrench,
   "Ren'Py SDK": Gamepad2,
+  RAPT: Gamepad2,
 };
 
 const INSTALL_HINTS: Record<string, string> = {
@@ -34,6 +35,9 @@ const INSTALL_HINTS: Record<string, string> = {
   "Ren'Py SDK": "renpy-sdk",
 };
 
+// Tools that must be installed manually — show an informational note instead of an install button.
+const MANUAL_INSTALL_TOOLS = new Set(["RAPT"]);
+
 interface Props {
   tool: ToolStatus;
   installing: boolean;
@@ -43,6 +47,7 @@ interface Props {
 export function ToolchainItem({ tool, installing, onInstall }: Props) {
   const Icon = TOOL_ICONS[tool.name] ?? Wrench;
   const installKey = INSTALL_HINTS[tool.name];
+  const isManual = MANUAL_INSTALL_TOOLS.has(tool.name);
 
   return (
     <div className="flex items-center gap-4 rounded-lg border border-border bg-card px-4 py-3">
@@ -68,7 +73,12 @@ export function ToolchainItem({ tool, installing, onInstall }: Props) {
         <Badge variant={tool.found ? "success" : "destructive"}>
           {tool.found ? "OK" : "Missing"}
         </Badge>
-        {!tool.found && installKey && (
+        {!tool.found && isManual && (
+          <span className="text-xs text-muted-foreground italic">
+            Manual install required
+          </span>
+        )}
+        {!tool.found && !isManual && installKey && (
           <Button
             size="sm"
             variant="outline"

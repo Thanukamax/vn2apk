@@ -1,5 +1,6 @@
 mod autodetect;
 mod error;
+mod error_translate;
 mod pipeline;
 mod settings;
 mod state;
@@ -7,6 +8,7 @@ mod toolchain;
 
 use error::AppError;
 use pipeline::engine_detect::{detect_engine, validate_game_folder, EngineDetectResult};
+use pipeline::{run_preflight, PreflightIssue};
 use pipeline::renpy::run_renpy_pipeline;
 use pipeline::rpgmv::{run_rpgmv_pipeline, suggest_app_id};
 use pipeline::types::{BuildOptions, ValidationResult};
@@ -100,6 +102,16 @@ async fn cmd_suggest_app_id(folder_name: String) -> Result<String, AppError> {
 }
 
 #[tauri::command]
+async fn cmd_preflight_check(
+    engine: String,
+    game_path: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<PreflightIssue>, AppError> {
+    let settings = state.settings.lock().unwrap().clone();
+    Ok(run_preflight(&engine, &game_path, &settings))
+}
+
+#[tauri::command]
 async fn cmd_start_build(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -170,6 +182,7 @@ pub fn run() {
             cmd_detect_engine,
             cmd_validate_game_folder,
             cmd_suggest_app_id,
+            cmd_preflight_check,
             cmd_start_build,
             cmd_cancel_build,
             cmd_open_file_manager,

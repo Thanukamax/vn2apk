@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { FolderOpen, KeyRound, Loader2 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -40,21 +40,16 @@ export function KeystoreSection({ settings, onChange }: Props) {
     if (typeof selected === "string") onChange({ ...settings, keystore_path: selected });
   };
 
-  const saveKeystore = async () => {
-    const selected = await saveDialog({ filters: [{ name: "Keystore", extensions: ["jks"] }] });
-    if (typeof selected === "string") onChange({ ...settings, keystore_path: selected });
-  };
-
   const generate = async () => {
+    const keystorePath = settings.keystore_path || "~/vn2apk-release.jks";
     if (!settings.keystore_path) {
-      await saveKeystore();
-      return;
+      onChange({ ...settings, keystore_path: keystorePath });
     }
     const dname = `CN=${form.cn}, OU=${form.ou}, O=${form.o}, L=${form.l}, ST=${form.st}, C=${form.c}`;
     setGenerating(true);
     try {
       await invoke("cmd_generate_keystore", {
-        keystorePath: settings.keystore_path,
+        keystorePath,
         alias: settings.keystore_alias,
         storepass: form.storepass,
         keypass: form.keypass,
@@ -142,7 +137,8 @@ export function KeystoreSection({ settings, onChange }: Props) {
           <DialogFooter>
             <Button
               onClick={generate}
-              disabled={generating || !form.storepass || !form.keypass}
+              disabled={generating || form.storepass.length < 6 || form.keypass.length < 6}
+              title={form.storepass.length < 6 || form.keypass.length < 6 ? "Passwords must be at least 6 characters" : undefined}
             >
               {generating ? <Loader2 className="h-4 w-4 animate-spin" /> : "Generate"}
             </Button>

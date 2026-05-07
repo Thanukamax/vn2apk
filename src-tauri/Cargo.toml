@@ -1,6 +1,6 @@
 [package]
 name = "vn2apk"
-version = "0.1.0"
+version = "1.0.0"
 description = "Convert PC VN/RPG game folders to signed Android APKs"
 authors = ["Thanukamax"]
 license = "MIT"
