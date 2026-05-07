@@ -47,7 +47,7 @@ export function SettingsPage() {
       for (const key of fieldKeys) {
         const val = detected[key] as string;
         if (val && val.trim().length > 0) {
-          (merged as Record<string, unknown>)[key] = val;
+          (merged as unknown as Record<string, unknown>)[key] = val;
           found.push(key.replace(/_/g, " "));
         } else {
           missing.push(key.replace(/_/g, " "));

@@ -29,7 +29,7 @@ export function GameDropZone({ onFolderSelected, disabled }: Props) {
           return;
         }
 
-        if (type === "leave" || type === "cancelled") {
+        if (type === "leave" || (type as string) === "cancelled") {
           setDragging(false);
           return;
         }

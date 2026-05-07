@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { Loader2, Play, Square } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
