@@ -261,6 +261,151 @@ fn sanitize_www_filenames(app: &AppHandle, www_dir: &Path) -> Result<(), AppErro
     Ok(())
 }
 
+/// Recursively check whether any file under `dir` has one of `exts` (case-insensitive).
+fn dir_has_ext(dir: &Path, exts: &[&str]) -> bool {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if dir_has_ext(&p, exts) {
+                    return true;
+                }
+            } else if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+                if exts.iter().any(|x| x.eq_ignore_ascii_case(ext)) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Patch RPG Maker MV games for the Android/Cordova WebView runtime, via a small
+/// shim injected before main.js. No-op for non-MV games (MZ/Tyrano).
+///
+///  - Audio: MV's `AudioManager.audioFileExt()` returns ".m4a" on every mobile
+///    device, but many games ship only Ogg. We force the extension the game
+///    actually contains, so audio resolves on Android.
+///  - Saves: the WebView uses localStorage instead of save/*.rpgsave files, so a
+///    player's bundled saves never load. We import them into localStorage on first
+///    run, without clobbering progress made on-device.
+fn patch_rpgmv_runtime(app: &AppHandle, www_dir: &Path) -> Result<(), AppError> {
+    let managers = www_dir.join("js/rpg_managers.js");
+    let index = www_dir.join("index.html");
+    if !managers.exists() || !index.exists() {
+        return Ok(()); // not an RPG Maker MV project
+    }
+
+    // Decide the audio extension from what the game ships (prefer Ogg).
+    let audio_dir = www_dir.join("audio");
+    let audio_ext = if dir_has_ext(&audio_dir, &["ogg", "rpgmvo"]) {
+        Some(".ogg")
+    } else if dir_has_ext(&audio_dir, &["m4a", "rpgmvm"]) {
+        Some(".m4a")
+    } else {
+        None
+    };
+
+    // Enumerate bundled saves and map each to its MV localStorage key.
+    let mut save_imports: Vec<(String, String)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(www_dir.join("save")) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("rpgsave") {
+                continue;
+            }
+            let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let key = if stem == "config" {
+                "RPG Config".to_string()
+            } else if stem == "global" {
+                "RPG Global".to_string()
+            } else if let Some(n) = stem.strip_prefix("file") {
+                if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
+                    format!("RPG File{n}")
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            };
+            let fname = p.file_name().unwrap().to_string_lossy().to_string();
+            save_imports.push((key, format!("save/{fname}")));
+        }
+    }
+
+    if audio_ext.is_none() && save_imports.is_empty() {
+        return Ok(());
+    }
+
+    // Build the shim.
+    let mut js = String::from(
+        "/* vn2apk compatibility shim — RPG Maker MV on Android / Cordova WebView.\n\
+         \x20* Auto-generated. Loaded after rpg_managers.js, before main.js. */\n\
+         (function () {\n  \"use strict\";\n",
+    );
+    if let Some(ext) = audio_ext {
+        js.push_str(&format!(
+            "  if (window.AudioManager) {{ AudioManager.audioFileExt = function () {{ return \"{ext}\"; }}; }}\n"
+        ));
+    }
+    if !save_imports.is_empty() {
+        js.push_str("  try {\n    var imports = [\n");
+        for (key, path) in &save_imports {
+            js.push_str(&format!("      [\"{key}\", \"{path}\"],\n"));
+        }
+        js.push_str(
+            "    ];\n\
+             \x20   imports.forEach(function (pair) {\n\
+             \x20     var key = pair[0], path = pair[1];\n\
+             \x20     if (localStorage.getItem(key) !== null) return;\n\
+             \x20     try {\n\
+             \x20       var xhr = new XMLHttpRequest();\n\
+             \x20       xhr.open(\"GET\", path, false);\n\
+             \x20       xhr.send(null);\n\
+             \x20       if (xhr.status === 200 || xhr.status === 0) {\n\
+             \x20         var data = (xhr.responseText || \"\").trim();\n\
+             \x20         if (data) localStorage.setItem(key, data);\n\
+             \x20       }\n\
+             \x20     } catch (e) {}\n\
+             \x20   });\n\
+             \x20 } catch (e) { if (window.console) console.error(\"vn2apk save import failed:\", e); }\n",
+        );
+    }
+    js.push_str("})();\n");
+    std::fs::write(www_dir.join("js/vn2apk_compat.js"), js)
+        .map_err(|e| AppError::msg(format!("Writing vn2apk_compat.js: {e}")))?;
+
+    // Inject the script tag before main.js (idempotent, quote/spacing agnostic).
+    let content = std::fs::read_to_string(&index)
+        .map_err(|e| AppError::msg(format!("Reading index.html: {e}")))?;
+    if !content.contains("vn2apk_compat.js") {
+        let tag = "<script type=\"text/javascript\" src=\"js/vn2apk_compat.js\"></script>";
+        let pos = content
+            .find("js/main.js")
+            .ok_or_else(|| AppError::msg("index.html has no main.js script — cannot inject compat shim"))?;
+        let start = content[..pos]
+            .rfind("<script")
+            .ok_or_else(|| AppError::msg("index.html main.js is not in a <script> tag"))?;
+        let patched = format!("{}{}\n        {}", &content[..start], tag, &content[start..]);
+        std::fs::write(&index, patched)
+            .map_err(|e| AppError::msg(format!("Writing index.html: {e}")))?;
+    }
+
+    let mut applied: Vec<&str> = Vec::new();
+    if audio_ext.is_some() {
+        applied.push("audio extension");
+    }
+    if !save_imports.is_empty() {
+        applied.push("bundled save import");
+    }
+    emit_log(
+        app,
+        "info",
+        &format!("Applied RPG Maker MV mobile compatibility fixes ({}).", applied.join(", ")),
+    );
+    Ok(())
+}
+
 fn copy_icon(
     game_path: &Path,
     cordova_dir: &Path,
@@ -379,6 +524,10 @@ async fn run_pipeline_inner(
         .map_err(|e| { emit_stage(app, PipelineStage::CopyAssets, StageStatus::Failed); e })?;
     // Sanitize non-ASCII filenames so AGP 8.x can fingerprint them without crashing.
     sanitize_www_filenames(app, &cordova_dir.join("www"))
+        .map_err(|e| { emit_stage(app, PipelineStage::CopyAssets, StageStatus::Failed); e })?;
+    // RPG Maker MV WebView fixes: force the shipped audio extension and import
+    // bundled saves into localStorage (no-op for MZ/Tyrano).
+    patch_rpgmv_runtime(app, &cordova_dir.join("www"))
         .map_err(|e| { emit_stage(app, PipelineStage::CopyAssets, StageStatus::Failed); e })?;
     emit_stage(app, PipelineStage::CopyAssets, StageStatus::Done);
     check_cancel(cancel)?;
