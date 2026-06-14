@@ -347,11 +347,24 @@ pub async fn build_android_release(
 ) -> Result<PathBuf, AppError> {
     let env = build_env(settings);
     let cordova_bin = find_cordova(settings)?;
-    // -- packageType=apk forces assembleRelease (APK) instead of bundleRelease (AAB)
+    // -- packageType=apk forces assembleRelease (APK) instead of bundleRelease (AAB).
+    // Skip Lint: lintVitalRelease pulls ~60 MB of lint-checks/intellij-core/kotlin-compiler
+    // that have zero effect on the produced APK. Excluding it keeps builds light on slow
+    // networks and lets a fully-cached toolchain build offline.
     stream_cmd(
         app,
         &cordova_bin,
-        &["build", "android", "--release", "--", "--packageType=apk"],
+        &[
+            "build",
+            "android",
+            "--release",
+            "--",
+            "--packageType=apk",
+            "--gradleArg=-x",
+            "--gradleArg=lintVitalRelease",
+            "--gradleArg=-x",
+            "--gradleArg=lintVitalAnalyzeRelease",
+        ],
         cordova_dir,
         &env,
     )
