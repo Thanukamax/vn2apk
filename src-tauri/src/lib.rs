@@ -15,7 +15,7 @@ use pipeline::types::{BuildOptions, ValidationResult};
 use settings::{load_settings, save_settings_to_disk, AppSettings};
 use state::AppState;
 use std::sync::{atomic::Ordering, Arc};
-use tauri::State;
+use tauri::{Manager, State};
 use toolchain::detect::check_all_tools;
 use toolchain::install::{generate_keystore, install_tool};
 use toolchain::types::ToolStatus;
@@ -173,6 +173,17 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_fs::init())
         .manage(AppState::new())
+        .setup(|app| {
+            // Load persisted settings into state at startup so toolchain checks,
+            // preflight, and builds don't depend on the UI visiting the Settings
+            // page first (which is what previously populated state.settings).
+            if let Ok(loaded) = load_settings(&app.handle()) {
+                if let Ok(mut s) = app.state::<AppState>().settings.lock() {
+                    *s = loaded;
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             cmd_get_settings,
             cmd_save_settings,
