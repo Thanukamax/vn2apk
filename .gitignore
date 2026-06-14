@@ -13,3 +13,8 @@ src-tauri/WixTools/
 # Bun
 bun.lockb
 src-tauri/gen/
+
+# Signing keys — never commit private keystores
+keystores/
+*.jks
+*.keystore
