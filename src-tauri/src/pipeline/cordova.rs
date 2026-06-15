@@ -351,6 +351,14 @@ pub async fn build_android_release(
     // Skip Lint: lintVitalRelease pulls ~60 MB of lint-checks/intellij-core/kotlin-compiler
     // that have zero effect on the produced APK. Excluding it keeps builds light on slow
     // networks and lets a fully-cached toolchain build offline.
+    //
+    // IMPORTANT (cordova-android 13): all gradle args must go in ONE --gradleArg whose
+    // value is a single space-separated string. cordova-android's build.js does
+    // `parseArgsStringToArgv(options.argv.gradleArg[0])` — it reads only the *first*
+    // --gradleArg and re-tokenizes it. Passing several --gradleArg=… flags keeps only
+    // the first (`-x`), which then attaches to the appended build task as
+    // `-x cdvBuildRelease` — excluding the build itself, so Gradle runs `:help` and
+    // emits no APK. Keep this as a single argument.
     stream_cmd(
         app,
         &cordova_bin,
@@ -360,10 +368,7 @@ pub async fn build_android_release(
             "--release",
             "--",
             "--packageType=apk",
-            "--gradleArg=-x",
-            "--gradleArg=lintVitalRelease",
-            "--gradleArg=-x",
-            "--gradleArg=lintVitalAnalyzeRelease",
+            "--gradleArg=-x lintVitalRelease -x lintVitalAnalyzeRelease",
         ],
         cordova_dir,
         &env,

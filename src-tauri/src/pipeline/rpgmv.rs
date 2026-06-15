@@ -306,7 +306,12 @@ fn patch_rpgmv_runtime(app: &AppHandle, www_dir: &Path) -> Result<(), AppError> 
         None
     };
 
-    // Enumerate bundled saves and map each to its MV localStorage key.
+    // Enumerate bundled saves and map each to its MV web-storage key. We read the
+    // payloads now and embed them directly into the shim (below) instead of fetching
+    // them at runtime: a *synchronous* XHR against cordova-android's WebViewAssetLoader
+    // (https://localhost) silently throws/returns empty, so the old fetch-based import
+    // never wrote anything and the game booted fresh. .rpgsave payloads are
+    // LZString-base64 (ASCII), so they inline cleanly as JS string literals.
     let mut save_imports: Vec<(String, String)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(www_dir.join("save")) {
         for e in rd.flatten() {
@@ -328,10 +333,29 @@ fn patch_rpgmv_runtime(app: &AppHandle, www_dir: &Path) -> Result<(), AppError> 
             } else {
                 continue;
             };
-            let fname = p.file_name().unwrap().to_string_lossy().to_string();
-            save_imports.push((key, format!("save/{fname}")));
+            // Read the save payload; skip unreadable or empty files.
+            let Ok(data) = std::fs::read_to_string(&p) else { continue };
+            let data = data.trim().to_string();
+            if data.is_empty() {
+                continue;
+            }
+            save_imports.push((key, data));
         }
     }
+
+    // Current game title, for repairing bundled globalInfo (see shim below). MV's
+    // DataManager.isThisGameFile() registers a web-storage slot only when the saved
+    // globalInfo entry's `title` matches $dataSystem.gameTitle. A save made on a
+    // differently-titled build (e.g. the untranslated original) is silently dropped,
+    // so the title in `global.rpgsave` is stale. We carry the current title in.
+    let game_title: Option<String> = std::fs::read_to_string(www_dir.join("data/System.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| {
+            v.get("gameTitle")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+        });
 
     if audio_ext.is_none() && save_imports.is_empty() {
         return Ok(());
@@ -349,27 +373,52 @@ fn patch_rpgmv_runtime(app: &AppHandle, www_dir: &Path) -> Result<(), AppError> 
         ));
     }
     if !save_imports.is_empty() {
-        js.push_str("  try {\n    var imports = [\n");
-        for (key, path) in &save_imports {
-            js.push_str(&format!("      [\"{key}\", \"{path}\"],\n"));
+        // Embed each payload inline. Keys/values are JSON-encoded for safe escaping;
+        // import is idempotent and never clobbers on-device progress.
+        js.push_str("  var saves = {\n");
+        for (key, data) in &save_imports {
+            let k = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".into());
+            let v = serde_json::to_string(data).unwrap_or_else(|_| "\"\"".into());
+            js.push_str(&format!("    {k}: {v},\n"));
         }
         js.push_str(
-            "    ];\n\
-             \x20   imports.forEach(function (pair) {\n\
-             \x20     var key = pair[0], path = pair[1];\n\
-             \x20     if (localStorage.getItem(key) !== null) return;\n\
-             \x20     try {\n\
-             \x20       var xhr = new XMLHttpRequest();\n\
-             \x20       xhr.open(\"GET\", path, false);\n\
-             \x20       xhr.send(null);\n\
-             \x20       if (xhr.status === 200 || xhr.status === 0) {\n\
-             \x20         var data = (xhr.responseText || \"\").trim();\n\
-             \x20         if (data) localStorage.setItem(key, data);\n\
-             \x20       }\n\
-             \x20     } catch (e) {}\n\
-             \x20   });\n\
-             \x20 } catch (e) { if (window.console) console.error(\"vn2apk save import failed:\", e); }\n",
+            "  };\n\
+             \x20 Object.keys(saves).forEach(function (key) {\n\
+             \x20   try {\n\
+             \x20     if (localStorage.getItem(key) === null) {\n\
+             \x20       localStorage.setItem(key, saves[key]);\n\
+             \x20     }\n\
+             \x20   } catch (e) { if (window.console) console.error(\"vn2apk save import failed:\", key, e); }\n\
+             \x20 });\n",
         );
+
+        // Repair globalInfo so MV's isThisGameFile() registers the bundled slots even
+        // when the saves came from a differently-titled build. Runs at shim time, when
+        // LZString + DataManager are loaded but $dataSystem is not yet — hence the title
+        // is injected from build-time System.json. Idempotent: on-device saves already
+        // carry the right title, so this is a no-op for them.
+        if let Some(title) = &game_title {
+            let t = serde_json::to_string(title).unwrap_or_else(|_| "\"\"".into());
+            js.push_str(&format!("  var __vn2apkTitle = {t};\n"));
+            js.push_str(
+                "  try {\n\
+                 \x20   if (window.LZString && window.DataManager && DataManager._globalId !== undefined) {\n\
+                 \x20     var __raw = localStorage.getItem(\"RPG Global\");\n\
+                 \x20     if (__raw) {\n\
+                 \x20       var __gi = JSON.parse(LZString.decompressFromBase64(__raw));\n\
+                 \x20       var __changed = false;\n\
+                 \x20       for (var __i = 0; __i < __gi.length; __i++) {\n\
+                 \x20         if (__gi[__i]) {\n\
+                 \x20           if (__gi[__i].globalId !== DataManager._globalId) { __gi[__i].globalId = DataManager._globalId; __changed = true; }\n\
+                 \x20           if (__gi[__i].title !== __vn2apkTitle) { __gi[__i].title = __vn2apkTitle; __changed = true; }\n\
+                 \x20         }\n\
+                 \x20       }\n\
+                 \x20       if (__changed) localStorage.setItem(\"RPG Global\", LZString.compressToBase64(JSON.stringify(__gi)));\n\
+                 \x20     }\n\
+                 \x20   }\n\
+                 \x20 } catch (e) { if (window.console) console.error(\"vn2apk globalInfo repair failed:\", e); }\n",
+            );
+        }
     }
     js.push_str("})();\n");
     std::fs::write(www_dir.join("js/vn2apk_compat.js"), js)
